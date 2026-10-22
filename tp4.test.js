@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { Channel, createChannel, registerChannel } from './notifications/channels.js';
+import { MessageBuilder } from './notifications/MessageBuilder.js';
 
 // --- Étape 1 · Factory Method + registre ---
 
@@ -37,4 +38,37 @@ test('Factory : une classe qui n’hérite pas de Channel est refusée', () => {
   class Pigeon { send() { return 'roucou'; } }
   assert.throws(() => registerChannel('pigeon', Pigeon), /doit hériter de Channel/);
   assert.throws(() => createChannel('pigeon'), /Canal inconnu/); // rien n'a été enregistré
+});
+
+// --- Étape 2 · Builder ---
+
+const aliceBuilder = () => new MessageBuilder()
+  .to('alice@exemple.fr')
+  .template('Bonjour {{nom}}, votre colis part avec {{transporteur}}.')
+  .with('nom', 'Alice')
+  .with('transporteur', 'Colissimo');
+
+test('Builder : un message valide, priorité normale par défaut', () => {
+  assert.deepEqual(aliceBuilder().priority('haute').build(), {
+    to: 'alice@exemple.fr', body: 'Bonjour Alice, votre colis part avec Colissimo.', priority: 'haute',
+  });
+  assert.equal(aliceBuilder().build().priority, 'normale');
+});
+
+test('Builder : chacune des 4 erreurs, détectées dans build()', () => {
+  assert.throws(() => new MessageBuilder().template('Bonjour').build(), /Destinataire obligatoire/);
+  assert.throws(() => new MessageBuilder().to('a@b.fr').build(), /Gabarit obligatoire/);
+  assert.throws(() => aliceBuilder().priority('urgente').build(), /Priorité invalide : urgente/);
+  assert.throws(() => new MessageBuilder().to('a@b.fr').template('Bonjour {{nom}}').build(),
+    /Variable manquante : nom/);
+});
+
+test('Builder : les méthodes ne valident rien, seul build() le fait', () => {
+  assert.doesNotThrow(() => new MessageBuilder().priority('urgente').to('').template(''));
+});
+
+test('Builder : le message construit est gelé (immuable)', () => {
+  const message = aliceBuilder().build();
+  assert.equal(Object.isFrozen(message), true);
+  assert.throws(() => { message.body = 'piraté'; }, TypeError); // un module ES est en mode strict
 });
