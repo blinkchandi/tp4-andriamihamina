@@ -7,6 +7,7 @@ import { MessageBuilder } from './notifications/MessageBuilder.js';
 import { ColissimoApi, DhlClient } from '../tp4/carrierApis.js';
 import { ColissimoAdapter, DhlAdapter } from './shipping/adapters.js';
 import { RetryQuote, CachedQuote } from './shipping/decorators.js';
+import { ShippingService } from './shipping/ShippingService.js';
 
 // --- Étape 1 · Factory Method + registre ---
 
@@ -144,4 +145,40 @@ test('Decorator : composition cache(retry(dhl))', async () => {
   assert.equal(client.calls, 2); // 1 panne absorbée par le retry
   await dhl.getQuote(parcel2kg);
   assert.equal(client.calls, 2); // servi par le cache
+});
+
+// --- Étape 4 · Facade ---
+
+const colissimo = () => new ColissimoAdapter(new ColissimoApi());
+const dhl = (options) => new DhlAdapter(new DhlClient(options));
+const fixedQuote = (carrier, price, days) => ({ getQuote: async () => ({ carrier, price, days }) });
+
+test('Facade : 2 kg → Colissimo, 10 kg → DHL', async () => {
+  const shipping = new ShippingService([colissimo(), dhl()]);
+  assert.equal((await shipping.bestQuote({ weightKg: 2, zip: '75011' })).carrier, 'Colissimo'); // 9.95 < 11
+  assert.equal((await shipping.bestQuote({ weightKg: 10, zip: '75011' })).carrier, 'DHL');     // 23 < 29.95
+});
+
+test('Facade : le moins cher, puis le plus rapide ; un transporteur en panne est ignoré', async () => {
+  const tie = new ShippingService([fixedQuote('Lent', 10, 3), fixedQuote('Rapide', 10, 1)]);
+  assert.equal((await tie.bestQuote(parcel2kg)).carrier, 'Rapide');
+  const withBroken = new ShippingService([dhl({ failFirst: 99 }), colissimo()]);
+  assert.equal((await withBroken.bestQuote({ weightKg: 10, zip: '75011' })).carrier, 'Colissimo');
+});
+
+test('Facade : liste vide ou tous en panne → « Aucun transporteur disponible »', async () => {
+  await assert.rejects(new ShippingService([]).bestQuote(parcel2kg), /Aucun transporteur disponible/);
+  await assert.rejects(new ShippingService([dhl({ failFirst: 99 })]).bestQuote(parcel2kg),
+    /Aucun transporteur disponible/);
+});
+
+test('Facade : les transporteurs sont interrogés en parallèle', async () => {
+  let started = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const slow = (carrier, price) => ({ getQuote: async () => { started++; await gate; return { carrier, price, days: 1 }; } });
+  const pending = new ShippingService([slow('A', 5), slow('B', 4)]).bestQuote(parcel2kg);
+  assert.equal(started, 2); // les 2 appels sont partis avant qu'aucun ne réponde
+  release();
+  assert.equal((await pending).carrier, 'B');
 });
